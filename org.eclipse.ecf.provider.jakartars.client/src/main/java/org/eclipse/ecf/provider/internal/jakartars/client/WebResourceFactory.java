@@ -1,0 +1,366 @@
+/*
+ * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS HEADER.
+ *
+ * Copyright (c) 2012-2015 Oracle and/or its affiliates. All rights reserved.
+ *
+ * The contents of this file are subject to the terms of either the GNU
+ * General Public License Version 2 only ("GPL") or the Common Development
+ * and Distribution License("CDDL") (collectively, the "License").  You
+ * may not use this file except in compliance with the License.  You can
+ * obtain a copy of the License at
+ * http://glassfish.java.net/public/CDDL+GPL_1_1.html
+ * or packager/legal/LICENSE.txt.  See the License for the specific
+ * language governing permissions and limitations under the License.
+ *
+ * When distributing the software, include this License Header Notice in each
+ * file and include the License file at packager/legal/LICENSE.txt.
+ *
+ * GPL Classpath Exception:
+ * Oracle designates this particular file as subject to the "Classpath"
+ * exception as provided by Oracle in the GPL Version 2 section of the License
+ * file that accompanied this code.
+ *
+ * Modifications:
+ * If applicable, add the following below the License Header, with the fields
+ * enclosed by brackets [] replaced by your own identifying information:
+ * "Portions Copyright [year] [name of copyright owner]"
+ *
+ * Contributor(s):
+ * If you wish your version of this file to be governed by only the CDDL or
+ * only the GPL Version 2, indicate your decision by adding "[Contributor]
+ * elects to include this software in this distribution under the [CDDL or GPL
+ * Version 2] license."  If you don't indicate a single choice of license, a
+ * recipient has the option to distribute your version of this file under
+ * either the CDDL, the GPL Version 2 or to extend the choice of license to
+ * its licensees as provided above.  However, if you add GPL Version 2 code
+ * and therefore, elected the GPL Version 2 license, then the option applies
+ * only if the new code is made subject to such option by the copyright
+ * holder.
+ */
+/* Portions Copyright 2018 Composent, Inc.
+ * Composent, Inc. elects to include this software in this distribution under the CDDL Version 2 license.
+ */
+package org.eclipse.ecf.provider.internal.jakartars.client;
+
+import java.lang.annotation.Annotation;
+import java.lang.reflect.AnnotatedElement;
+import java.lang.reflect.InvocationHandler;
+import java.lang.reflect.Method;
+import java.lang.reflect.ParameterizedType;
+import java.lang.reflect.Proxy;
+import java.lang.reflect.Type;
+import java.security.AccessController;
+import java.security.PrivilegedAction;
+import java.util.Arrays;
+import java.util.Collection;
+import java.util.Collections;
+import java.util.HashMap;
+import java.util.LinkedList;
+import java.util.List;
+import java.util.Map;
+
+import org.eclipse.ecf.remoteservice.asyncproxy.AsyncReturnUtil;
+
+import jakarta.ws.rs.Consumes;
+import jakarta.ws.rs.CookieParam;
+import jakarta.ws.rs.DefaultValue;
+import jakarta.ws.rs.FormParam;
+import jakarta.ws.rs.HeaderParam;
+import jakarta.ws.rs.HttpMethod;
+import jakarta.ws.rs.MatrixParam;
+import jakarta.ws.rs.Path;
+import jakarta.ws.rs.PathParam;
+import jakarta.ws.rs.Produces;
+import jakarta.ws.rs.QueryParam;
+import jakarta.ws.rs.client.Entity;
+import jakarta.ws.rs.client.Invocation;
+import jakarta.ws.rs.client.WebTarget;
+import jakarta.ws.rs.core.Cookie;
+import jakarta.ws.rs.core.Form;
+import jakarta.ws.rs.core.GenericEntity;
+import jakarta.ws.rs.core.GenericType;
+import jakarta.ws.rs.core.HttpHeaders;
+import jakarta.ws.rs.core.MediaType;
+import jakarta.ws.rs.core.MultivaluedHashMap;
+import jakarta.ws.rs.core.MultivaluedMap;
+
+/**
+ * Factory for client-side representation of a resource. See the
+ * <a href="package-summary.html">package overview</a> for an example on how to
+ * use this class.
+ *
+ * @author Martin Matula
+ * @author Scott Lewis
+ */
+public final class WebResourceFactory implements InvocationHandler {
+
+	private static final String[] EMPTY = {};
+
+	private final WebTarget target;
+	private final MultivaluedMap<String, Object> headers;
+	private final List<Cookie> cookies;
+	private final Form form;
+	private final boolean isOSGiAsync;
+
+	private static final MultivaluedMap<String, Object> EMPTY_HEADERS = new MultivaluedHashMap<>();
+	private static final Form EMPTY_FORM = new Form();
+	@SuppressWarnings("rawtypes")
+	private static final List<Class> PARAM_ANNOTATION_CLASSES = Arrays.<Class>asList(PathParam.class, QueryParam.class,
+			HeaderParam.class, CookieParam.class, MatrixParam.class, FormParam.class);
+
+	public static PrivilegedAction<ClassLoader> getClassLoaderPA(final Class<?> clazz) {
+		return new PrivilegedAction<ClassLoader>() {
+			@Override
+			public ClassLoader run() {
+				return clazz.getClassLoader();
+			}
+		};
+	}
+
+	public static <C> C newResource(final Class<C> resourceInterface, final WebTarget target, boolean isOSGiAsync) {
+		return newResource(resourceInterface, target, true, EMPTY_HEADERS, Collections.<Cookie>emptyList(), EMPTY_FORM,
+				isOSGiAsync);
+	}
+
+	@SuppressWarnings("unchecked")
+	public static <C> C newResource(final Class<C> resourceInterface, final WebTarget target,
+			final boolean ignoreResourcePath, final MultivaluedMap<String, Object> headers, final List<Cookie> cookies,
+			final Form form, boolean isOSGiAsync) {
+
+		return (C) Proxy.newProxyInstance(AccessController.doPrivileged(getClassLoaderPA(resourceInterface)),
+				new Class[] { resourceInterface },
+				new WebResourceFactory(ignoreResourcePath ? target : addPathFromAnnotation(resourceInterface, target),
+						headers, cookies, form, isOSGiAsync));
+	}
+
+	private WebResourceFactory(final WebTarget target, final MultivaluedMap<String, Object> headers,
+			final List<Cookie> cookies, final Form form, boolean isOSGiAsync) {
+		this.target = target;
+		this.headers = headers;
+		this.cookies = cookies;
+		this.form = form;
+		this.isOSGiAsync = isOSGiAsync;
+	}
+
+	@Override
+	@SuppressWarnings({ "unchecked", "rawtypes" })
+	public Object invoke(final Object proxy, final Method method, final Object[] args) throws Throwable {
+		if (args == null && method.getName().equals("toString"))
+			return toString();
+
+		// determine method name
+		String httpMethod = getHttpMethodName(method);
+		if (httpMethod == null)
+			for (final Annotation ann : method.getAnnotations()) {
+				httpMethod = getHttpMethodName(ann.annotationType());
+				if (httpMethod != null)
+					break;
+			}
+
+		// create a new UriBuilder appending the @Path attached to the method
+		WebTarget newTarget = addPathFromAnnotation(method, target);
+
+		if (httpMethod == null) {
+			if (newTarget == target)
+				// no path annotation on the method -> fail
+				throw new UnsupportedOperationException("Not a resource method.");
+		}
+		// process method params (build maps of
+		// (Path|Form|Cookie|Matrix|Header..)Params
+		// and extract entity type
+		final MultivaluedHashMap<String, Object> headers = new MultivaluedHashMap<String, Object>(this.headers);
+		final LinkedList<Cookie> cookies = new LinkedList<>(this.cookies);
+		final Form form = new Form();
+		form.asMap().putAll(this.form.asMap());
+		final Annotation[][] paramAnns = method.getParameterAnnotations();
+		Object entity = null;
+		Type entityType = null;
+		for (int i = 0; i < paramAnns.length; i++) {
+			final Map<Class, Annotation> anns = new HashMap<>();
+			for (final Annotation ann : paramAnns[i]) {
+				anns.put(ann.annotationType(), ann);
+			}
+			Annotation ann;
+			Object value = args[i];
+			if (!hasAnyParamAnnotation(anns)) {
+				entityType = method.getGenericParameterTypes()[i];
+				entity = value;
+			} else {
+				if (value == null && (ann = anns.get(DefaultValue.class)) != null) {
+					value = ((DefaultValue) ann).value();
+				}
+
+				if (value != null) {
+					if ((ann = anns.get(PathParam.class)) != null) {
+						newTarget = newTarget.resolveTemplate(((PathParam) ann).value(), value);
+					} else if ((ann = anns.get((QueryParam.class))) != null) {
+						if (value instanceof Collection) {
+							newTarget = newTarget.queryParam(((QueryParam) ann).value(), convert((Collection) value));
+						} else {
+							newTarget = newTarget.queryParam(((QueryParam) ann).value(), value);
+						}
+					} else if ((ann = anns.get((HeaderParam.class))) != null) {
+						if (value instanceof Collection) {
+							headers.addAll(((HeaderParam) ann).value(), convert((Collection) value));
+						} else {
+							headers.addAll(((HeaderParam) ann).value(), value);
+						}
+
+					} else if ((ann = anns.get((CookieParam.class))) != null) {
+						final String name = ((CookieParam) ann).value();
+						Cookie c;
+						if (value instanceof Collection) {
+							for (final Object v : ((Collection) value)) {
+								if (!(v instanceof Cookie)) {
+									c = new Cookie(name, v.toString());
+								} else {
+									c = (Cookie) v;
+									if (!name.equals(((Cookie) v).getName())) {
+										// is this the right thing to do? or
+										// should I fail? or ignore the
+										// difference?
+										c = new Cookie(name, c.getValue(), c.getPath(), c.getDomain(), c.getVersion());
+									}
+								}
+								cookies.add(c);
+							}
+						} else {
+							if (!(value instanceof Cookie)) {
+								cookies.add(new Cookie(name, value.toString()));
+							} else {
+								c = (Cookie) value;
+								if (!name.equals(((Cookie) value).getName())) {
+									// is this the right thing to do? or should
+									// I fail? or ignore the difference?
+									cookies.add(
+											new Cookie(name, c.getValue(), c.getPath(), c.getDomain(), c.getVersion()));
+								}
+							}
+						}
+					} else if ((ann = anns.get((MatrixParam.class))) != null) {
+						if (value instanceof Collection) {
+							newTarget = newTarget.matrixParam(((MatrixParam) ann).value(), convert((Collection) value));
+						} else {
+							newTarget = newTarget.matrixParam(((MatrixParam) ann).value(), value);
+						}
+					} else if ((ann = anns.get((FormParam.class))) != null) {
+						if (value instanceof Collection) {
+							for (final Object v : ((Collection) value)) {
+								form.param(((FormParam) ann).value(), v.toString());
+							}
+						} else {
+							form.param(((FormParam) ann).value(), value.toString());
+						}
+					}
+				}
+			}
+		}
+
+		// accepted media types
+		Produces produces = method.getAnnotation(Produces.class);
+		final String[] accepts = (produces == null) ? EMPTY : produces.value();
+
+		// determine content type
+		String contentType = null;
+		if (entity != null) {
+			final List<Object> contentTypeEntries = headers.get(HttpHeaders.CONTENT_TYPE);
+			if ((contentTypeEntries != null) && (!contentTypeEntries.isEmpty())) {
+				contentType = contentTypeEntries.get(0).toString();
+			} else {
+				Consumes consumes = method.getAnnotation(Consumes.class);
+				if (consumes != null && consumes.value().length > 0) {
+					contentType = consumes.value()[0];
+				}
+			}
+		}
+
+		Invocation.Builder builder = newTarget.request().headers(headers) // this
+																			// resets
+																			// all
+																			// headers
+																			// so
+																			// do
+																			// this
+																			// first
+				.accept(accepts); // if @Produces is defined, propagate values
+									// into Accept header; empty array is NO-OP
+
+		for (final Cookie c : cookies)
+			builder = builder.cookie(c);
+
+		if (entity == null && !form.asMap().isEmpty()) {
+			entity = form;
+			contentType = MediaType.APPLICATION_FORM_URLENCODED;
+		} else {
+			if (contentType == null)
+				contentType = MediaType.APPLICATION_OCTET_STREAM;
+			if (!form.asMap().isEmpty()) {
+				if (entity instanceof Form) {
+					((Form) entity).asMap().putAll(form.asMap());
+				} else {
+					// TODO: should at least log some warning here
+				}
+			}
+		}
+
+		Class<?> returnType = method.getReturnType();
+		Type genericReturnType = method.getGenericReturnType();
+		GenericType responseGenericType = null;
+		// Check if osgi async and return type is one of apprpriate types
+		// (CompletableFuture, Promise, Future, IFuture)
+		if (this.isOSGiAsync && AsyncReturnUtil.isAsyncType(returnType)) {
+			// All of these types are parameterized types
+			ParameterizedType pt = (ParameterizedType) genericReturnType;
+			// Only one parameter (type of return)
+			responseGenericType = new GenericType(pt.getActualTypeArguments()[0]);
+		} else {
+			responseGenericType = new GenericType(genericReturnType);
+		}
+
+		Object resp = null;
+		if (entity != null) {
+			if (entityType instanceof ParameterizedType)
+				entity = new GenericEntity(entity, entityType);
+			// block here making actual remote call
+			resp = builder.method(httpMethod, Entity.entity(entity, contentType), responseGenericType);
+		} else
+			// block here making actual remote call
+			resp = builder.method(httpMethod, responseGenericType);
+
+		return (this.isOSGiAsync && AsyncReturnUtil.isAsyncType(returnType))
+				? AsyncReturnUtil.convertReturnToAsync(resp, returnType)
+				: resp;
+	}
+
+	@SuppressWarnings("rawtypes")
+	private boolean hasAnyParamAnnotation(final Map<Class, Annotation> anns) {
+		for (final Class paramAnnotationClass : PARAM_ANNOTATION_CLASSES) {
+			if (anns.containsKey(paramAnnotationClass)) {
+				return true;
+			}
+		}
+		return false;
+	}
+
+	private Object[] convert(@SuppressWarnings("rawtypes") final Collection value) {
+		return value.toArray();
+	}
+
+	private static WebTarget addPathFromAnnotation(final AnnotatedElement ae, WebTarget target) {
+		final Path p = ae.getAnnotation(Path.class);
+		if (p != null) {
+			target = target.path(p.value());
+		}
+		return target;
+	}
+
+	@Override
+	public String toString() {
+		return target.toString();
+	}
+
+	private static String getHttpMethodName(final AnnotatedElement ae) {
+		final HttpMethod a = ae.getAnnotation(HttpMethod.class);
+		return a == null ? null : a.value();
+	}
+}
