@@ -7,7 +7,9 @@
     <artifactId>org.eclipse.ecf.jakartars.parent</artifactId>
     <version>1.0.0-SNAPSHOT</version>
   </parent>
+  
   <artifactId>org.eclipse.ecf.provider.jersey.server</artifactId>
+  <name>ECF Distribution Provider - Jersey JakartaRS Server</name>
 
   <dependencies>
     <dependency>
@@ -75,17 +77,6 @@
       <plugin>
         <groupId>biz.aQute.bnd</groupId>
         <artifactId>bnd-maven-plugin</artifactId>
-        <configuration>
-        <bnd>
-            <![CDATA[
-Bundle-SymbolicName: ${project.artifactId}
-Bundle-Name: ECF Distribution Provider - Jersey JakartaRS Server
--sources: true
--contract: *
--jpms-module-info:
-]]>
-          </bnd>
-        </configuration>
       </plugin>
     </plugins>
   </build>

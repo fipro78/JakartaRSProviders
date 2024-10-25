@@ -5,7 +5,9 @@
 		<artifactId>org.eclipse.ecf.jakartars.parent</artifactId>
 		<version>1.0.0-SNAPSHOT</version>
 	</parent>
+	
 	<artifactId>org.eclipse.ecf.provider.jakartars.client</artifactId>
+	<name>ECF Distribution Provider - JakartaRS Client Support</name>
 
   <dependencies>
     <dependency>
@@ -58,17 +60,6 @@
       <plugin>
         <groupId>biz.aQute.bnd</groupId>
         <artifactId>bnd-maven-plugin</artifactId>
-        <configuration>
-        <bnd>
-            <![CDATA[
-Bundle-SymbolicName: ${project.artifactId}
-Bundle-Name: ECF Distribution Provider - JakartaRS Client Support
--sources: true
--contract: *
--jpms-module-info:
-]]>
-          </bnd>
-        </configuration>
       </plugin>
     </plugins>
   </build>
